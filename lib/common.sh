@@ -187,3 +187,21 @@ service_enable() {
         *)       warn "unknown init system; enable and start $1 by hand"; return 1 ;;
     esac
 }
+
+# service_restart NAME - restart a running service (start it if stopped).
+service_restart() {
+    case "$(init_system)" in
+        systemd) as_root systemctl restart "$1" ;;
+        openrc)  as_root rc-service "$1" restart ;;
+        runit)   as_root sv restart "$1" ;;
+        *)       warn "unknown init system; restart $1 by hand"; return 1 ;;
+    esac
+}
+
+# root_write FILE - write stdin to FILE as root. An existing file keeps its
+# owner and mode; create it first with `as_root install -m MODE` to control
+# them (do that for anything holding a secret).
+root_write() { as_root tee "$1" >/dev/null; }
+
+# random_string LENGTH - letters and digits from /dev/urandom.
+random_string() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1"; }
