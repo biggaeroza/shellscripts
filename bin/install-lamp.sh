@@ -75,23 +75,23 @@ trap 'exit 130' INT TERM
 PHP_FPM=""
 case "$PM" in
     apt)
-        WEB_SVC=apache2; DB_SVC=mariadb; WEB_USER=www-data
+        WEB_SVC=apache2; DB_SVC=mariadb; WEB_USER=www-data; DOCROOT=/var/www/html
         CONF_DIR=/etc/apache2/conf-available
         ;;
     dnf|yum)
-        WEB_SVC=httpd; DB_SVC=mariadb; WEB_USER=apache
+        WEB_SVC=httpd; DB_SVC=mariadb; WEB_USER=apache; DOCROOT=/var/www/html
         CONF_DIR=/etc/httpd/conf.d; PHP_FPM=php-fpm
         ;;
     zypper)
-        WEB_SVC=apache2; DB_SVC=mariadb; WEB_USER=wwwrun
+        WEB_SVC=apache2; DB_SVC=mariadb; WEB_USER=wwwrun; DOCROOT=/srv/www/htdocs
         CONF_DIR=/etc/apache2/conf.d
         ;;
     pacman)
-        WEB_SVC=httpd; DB_SVC=mariadb; WEB_USER=http
+        WEB_SVC=httpd; DB_SVC=mariadb; WEB_USER=http; DOCROOT=/srv/http
         CONF_DIR=/etc/httpd/conf/extra
         ;;
     apk)
-        WEB_SVC=apache2; DB_SVC=mariadb; WEB_USER=apache
+        WEB_SVC=apache2; DB_SVC=mariadb; WEB_USER=apache; DOCROOT=/var/www/localhost/htdocs
         CONF_DIR=/etc/apache2/conf.d
         ;;
     *)
@@ -536,5 +536,5 @@ info ""
 if [ "$FAILED" = 1 ]; then warn "installed, but some checks failed (see above)"; exit 1; fi
 ok "done"
 info "phpMyAdmin: http://$SERVER_NAME/phpmyadmin/ (log in as $DB_ADMIN_USER)"
-info "Web root:   Apache's default document root for this distribution"
+info "Web root:   $DOCROOT (http://$SERVER_NAME/)"
 info "MariaDB:    sudo mariadb, or mariadb -u $DB_ADMIN_USER -p"
