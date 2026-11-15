@@ -4,6 +4,17 @@ Helper scripts for setting up machines and running everyday tasks. Every
 script must work on any Linux distribution, not only the one it was
 written on.
 
+## Scripts
+
+| Script | What it does |
+|---|---|
+| `bin/add-to-dialout.sh` | Adds you to the serial-port group (`dialout`, or `uucp` on Arch) so you can use USB-serial adapters without root. `--check` only reports. |
+| `bin/install-virt-manager.sh` | Installs QEMU/KVM, libvirt and virt-manager with UEFI firmware, a software TPM, virt-install and virt-viewer; starts libvirt, turns on the `default` NAT network and adds you to the `libvirt` and `kvm` groups. `--check` only reports. |
+
+Every script shows its options with `--help`, asks before changing
+anything (`--yes` skips the question) and uses root only for the steps
+that need it.
+
 ## Layout
 
 ```

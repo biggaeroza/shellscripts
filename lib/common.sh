@@ -130,3 +130,60 @@ confirm() {
     read -r _reply || return 1
     case "$_reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
 }
+
+# --- users and groups ----------------------------------------------------------
+
+# invoking_user - the human who ran the script: SUDO_USER / DOAS_USER when
+# run through sudo or doas, else the current user.
+invoking_user() {
+    if [ "$(id -u)" -eq 0 ]; then
+        for _u in "${SUDO_USER:-}" "${DOAS_USER:-}"; do
+            [ -n "$_u" ] && [ "$_u" != root ] && { printf '%s\n' "$_u"; return 0; }
+        done
+    fi
+    id -un
+}
+
+# group_exists GROUP
+group_exists() {
+    if have_cmd getent; then getent group "$1" >/dev/null 2>&1
+    else grep -q "^$1:" /etc/group 2>/dev/null; fi
+}
+
+# user_in_group USER GROUP - from the group database, so it is true right
+# after an add, before the user has logged in again.
+user_in_group() { id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$2"; }
+
+# add_user_to_group USER GROUP - with whichever tool the system has
+# (usermod: shadow-utils; gpasswd; addgroup: busybox/Alpine).
+add_user_to_group() {
+    if have_cmd usermod || [ -x /usr/sbin/usermod ] || [ -x /sbin/usermod ]; then
+        as_root usermod -aG "$2" "$1"
+    elif have_cmd gpasswd; then
+        as_root gpasswd -a "$1" "$2"
+    elif have_cmd addgroup; then
+        as_root addgroup "$1" "$2"
+    else
+        warn "no usermod, gpasswd or addgroup found"; return 1
+    fi
+}
+
+# --- services -------------------------------------------------------------------
+
+# init_system - prints systemd, openrc, runit or unknown.
+init_system() {
+    if [ -d /run/systemd/system ]; then echo systemd
+    elif have_cmd rc-update; then echo openrc
+    elif have_cmd sv && { [ -d /var/service ] || [ -d /etc/runit ]; }; then echo runit
+    else echo unknown; fi
+}
+
+# service_enable NAME - enable at boot and start now.
+service_enable() {
+    case "$(init_system)" in
+        systemd) as_root systemctl enable --now "$1" ;;
+        openrc)  as_root rc-update add "$1" default && as_root rc-service "$1" start ;;
+        runit)   [ -e "/var/service/$1" ] || as_root ln -s "/etc/sv/$1" /var/service/ ;;
+        *)       warn "unknown init system; enable and start $1 by hand"; return 1 ;;
+    esac
+}
