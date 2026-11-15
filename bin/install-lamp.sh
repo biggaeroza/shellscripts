@@ -292,22 +292,44 @@ WEB_GROUP=$(id -gn "$WEB_USER") || die "the web server user $WEB_USER doesn't ex
 # --- MariaDB ------------------------------------------------------------------------------
 
 info ""; info "== MariaDB"
-# Arch and Alpine ship an empty data directory; create the system tables.
-# The data directory is readable only by mysql/root, so look as root.
-if ! as_root test -d /var/lib/mysql/mysql; then
-    if have_cmd mariadb-install-db || [ -x /usr/bin/mariadb-install-db ]; then
-        as_root mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null
-    else
-        as_root mysql_install_db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null
+# Debian/Ubuntu, Fedora and openSUSE create MariaDB's system tables
+# themselves (on install or first start). Arch and Alpine leave the data
+# directory empty: there, and only if the server doesn't come up as
+# installed, create them. Never run this over a working server - under
+# Ubuntu's AppArmor profile it can't even read the directory.
+db_up() { sql_root -e 'SELECT 1' >/dev/null 2>&1; }
+db_wait() { # SECONDS
+    _t=0
+    until db_up; do
+        _t=$((_t + 1)); [ "$_t" -lt "$1" ] || return 1
+        sleep 1
+    done
+}
+if ! db_up; then
+    service_enable "$DB_SVC" || true
+    if ! db_wait 20; then
+        case "$PM" in
+            pacman|apk)
+                if as_root test -d /var/lib/mysql/mysql; then
+                    die "MariaDB doesn't start, but its data directory is already set up; see its log"
+                fi
+                if have_cmd mariadb-install-db || [ -x /usr/bin/mariadb-install-db ]; then
+                    as_root mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null
+                else
+                    as_root mysql_install_db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null
+                fi
+                ok "data directory initialised"
+                service_restart "$DB_SVC"
+                db_wait 30 || die "MariaDB didn't come up after initialising it"
+                ;;
+            *)
+                die "MariaDB didn't come up; see its log (journalctl -u $DB_SVC)"
+                ;;
+        esac
     fi
-    ok "data directory initialised"
 fi
 service_enable "$DB_SVC"
-_tries=0
-until sql_root -e 'SELECT 1' >/dev/null 2>&1; do
-    _tries=$((_tries + 1)); [ "$_tries" -lt 30 ] || die "MariaDB didn't come up"
-    sleep 1
-done
+ok "MariaDB is running"
 
 sql_root <<EOF
 ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD($(sql_str "$DB_ROOT_PW"));
