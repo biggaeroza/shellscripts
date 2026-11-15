@@ -19,9 +19,18 @@
 #   LAMP_DB_ROOT_PASSWORD   password for MariaDB's root user
 #   LAMP_DB_ADMIN_USER      a MariaDB user with all privileges, for phpMyAdmin
 #   LAMP_DB_ADMIN_PASSWORD  that user's password
-#   LAMP_PMA_REMOTE         1 = phpMyAdmin reachable from other computers
+#   LAMP_PMA_REMOTE         1 = phpMyAdmin reachable from the LAN
 #                           (default 0: this computer only)
-#   LAMP_OPEN_FIREWALL      1 = open HTTP (port 80) in firewalld or ufw
+#   LAMP_DB_REMOTE          1 = MariaDB reachable from the LAN: it listens on
+#                           all addresses and the admin user may log in from
+#                           the LAN (default 0: MariaDB listens on 127.0.0.1)
+#   LAMP_LAN_SUBNET         the LAN, e.g. 192.168.1.0/24 (default: the subnet
+#                           of the interface with the default route)
+#   LAMP_OPEN_FIREWALL      1 = open HTTP (80), and MariaDB (3306) if it is
+#                           reachable, to the LAN only, in firewalld or ufw
+#
+# "The LAN" is always that one subnet: nothing is opened to the internet,
+# and root never logs in from anywhere but this computer.
 #
 # phpMyAdmin comes from phpmyadmin.net (SHA-256 checked) into /opt/phpmyadmin,
 # at http://SERVER/phpmyadmin/. MariaDB's root keeps logging in through
@@ -139,6 +148,49 @@ apachectl_cmd() {
     echo ""
 }
 
+# --- the LAN ----------------------------------------------------------------------
+
+# lan_iface - the interface with the default route.
+lan_iface() { ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}'; }
+
+# lan_subnet - that interface's subnet, e.g. 192.168.88.0/24.
+lan_subnet() {
+    _if=$(lan_iface); [ -n "$_if" ] || return 1
+    ip -4 route show dev "$_if" 2>/dev/null | awk '/scope link/ && $1 ~ /\// {print $1; exit}'
+}
+
+# lan_ip - this computer's address on that interface.
+lan_ip() {
+    _if=$(lan_iface); [ -n "$_if" ] || return 1
+    ip -4 -o addr show dev "$_if" 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}'
+}
+
+cidr_valid() {
+    printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$' || return 1
+    for _o in $(printf '%s' "${1%/*}" | tr '.' ' '); do [ "$_o" -le 255 ] || return 1; done
+}
+
+# cidr_host_pattern 192.168.88.0/24 -> 192.168.88.0/255.255.255.0: the form
+# MariaDB accepts as a user's host, with the network address masked right.
+cidr_host_pattern() {
+    _bits=${1#*/}; _net=""; _mask=""
+    set -- $(printf '%s' "${1%/*}" | tr '.' ' ')
+    for _o in "$1" "$2" "$3" "$4"; do
+        if [ "$_bits" -ge 8 ]; then _m=255; _bits=$((_bits - 8))
+        else _m=$((256 - (1 << (8 - _bits)))); _bits=0; fi
+        _net="$_net${_net:+.}$((_o & _m))"; _mask="$_mask${_mask:+.}$_m"
+    done
+    printf '%s/%s\n' "$_net" "$_mask"
+}
+
+# MariaDB server settings: a drop-in read after the distro's own files.
+db_conf_dir() {
+    for _d in /etc/mysql/mariadb.conf.d /etc/my.cnf.d; do
+        [ -d "$_d" ] && { echo "$_d"; return 0; }
+    done
+    return 1
+}
+
 firewall_kind() {
     if have_cmd firewall-cmd && as_root firewall-cmd --state >/dev/null 2>&1; then echo firewalld
     elif have_cmd ufw && as_root ufw status 2>/dev/null | grep -q 'Status: active'; then echo ufw
@@ -243,10 +295,20 @@ DB_ADMIN_PW=${LAMP_DB_ADMIN_PASSWORD:-}
 [ -n "$DB_ADMIN_PW" ] || { need_answer LAMP_DB_ADMIN_PASSWORD; DB_ADMIN_PW=$(ask_secret "Password for $DB_ADMIN_USER"); }
 [ "${#DB_ADMIN_PW}" -ge 8 ] || die "the admin password needs at least 8 characters"
 
+LAN_SUBNET=${LAMP_LAN_SUBNET:-$(lan_subnet || true)}
+DB_LAN_HOST=""
+_lan_hint=${LAN_SUBNET:-not detected}
+
 PMA_REMOTE=${LAMP_PMA_REMOTE:-}
 if [ -z "$PMA_REMOTE" ]; then
     if [ "$ASSUME_YES" = 1 ]; then PMA_REMOTE=0
-    else PMA_REMOTE=$(ask_yn "Allow phpMyAdmin from other computers (not only this one)?" 0); fi
+    else PMA_REMOTE=$(ask_yn "Allow phpMyAdmin from the LAN ($_lan_hint), not only this computer?" 0); fi
+fi
+
+DB_REMOTE=${LAMP_DB_REMOTE:-}
+if [ -z "$DB_REMOTE" ]; then
+    if [ "$ASSUME_YES" = 1 ]; then DB_REMOTE=0
+    else DB_REMOTE=$(ask_yn "Allow MariaDB connections from the LAN ($_lan_hint) as $DB_ADMIN_USER?" 0); fi
 fi
 
 FIREWALL=$(firewall_kind)
@@ -254,8 +316,24 @@ OPEN_FW=${LAMP_OPEN_FIREWALL:-}
 if [ "$FIREWALL" = none ]; then
     OPEN_FW=0
 elif [ -z "$OPEN_FW" ]; then
+    _ports="HTTP (80)"; [ "$DB_REMOTE" = 1 ] && _ports="HTTP (80) and MariaDB (3306)"
     if [ "$ASSUME_YES" = 1 ]; then OPEN_FW=0
-    else OPEN_FW=$(ask_yn "$FIREWALL is active: open HTTP (port 80) so other computers can reach Apache?" 0); fi
+    else OPEN_FW=$(ask_yn "$FIREWALL is active: open $_ports to the LAN ($_lan_hint)?" "$( [ "$PMA_REMOTE" = 1 ] || [ "$DB_REMOTE" = 1 ] && echo 1 || echo 0 )"); fi
+fi
+
+# The subnet matters only if something is opened to the LAN.
+if [ "$PMA_REMOTE" = 1 ] || [ "$DB_REMOTE" = 1 ] || [ "$OPEN_FW" = 1 ]; then
+    if [ -z "${LAMP_LAN_SUBNET:-}" ] && [ "$ASSUME_YES" != 1 ]; then
+        LAN_SUBNET=$(ask "LAN subnet" "$LAN_SUBNET")
+    fi
+    until cidr_valid "$LAN_SUBNET"; do
+        need_answer LAMP_LAN_SUBNET
+        warn "give the subnet as address/prefix, e.g. 192.168.1.0/24"
+        LAN_SUBNET=$(ask "LAN subnet" "")
+    done
+    # Normalise to the network address (192.168.88.254/24 -> 192.168.88.0/24).
+    _hp=$(cidr_host_pattern "$LAN_SUBNET"); LAN_SUBNET=${_hp%/*}/${LAN_SUBNET#*/}
+    DB_LAN_HOST=$(cidr_host_pattern "$LAN_SUBNET")
 fi
 
 PKG_LIST=$(packages)
@@ -266,9 +344,14 @@ info "  install with $PM (as root): $PKG_LIST"
 info "  Apache: ServerName $SERVER_NAME, PHP, phpMyAdmin at http://$SERVER_NAME/phpmyadmin/"
 info "  MariaDB: root password set (sudo mariadb keeps working), anonymous users and test database removed"
 info "  MariaDB user $DB_ADMIN_USER@localhost with all privileges"
-info "  phpMyAdmin ${PMA_VERSION:-latest} from phpmyadmin.net into $PMA_DIR, reachable from $( [ "$PMA_REMOTE" = 1 ] && echo 'any computer' || echo 'this computer only' )"
+if [ "$DB_REMOTE" = 1 ]; then
+    info "  MariaDB listens on all addresses (bind-address 0.0.0.0); $DB_ADMIN_USER may also log in from $LAN_SUBNET"
+else
+    info "  MariaDB listens on this computer only (bind-address 127.0.0.1)"
+fi
+info "  phpMyAdmin ${PMA_VERSION:-latest} from phpmyadmin.net into $PMA_DIR, reachable from $( [ "$PMA_REMOTE" = 1 ] && echo "this computer and $LAN_SUBNET" || echo 'this computer only' )"
 info "  its control user $PMA_CONTROL_USER@localhost and configuration storage database phpmyadmin (random password)"
-[ "$OPEN_FW" = 1 ] && info "  $FIREWALL: open HTTP (port 80)"
+[ "$OPEN_FW" = 1 ] && info "  $FIREWALL: open $( [ "$DB_REMOTE" = 1 ] && echo 'HTTP (80) and MariaDB (3306)' || echo 'HTTP (80)') to $LAN_SUBNET only"
 info "  enable and start: $WEB_SVC $DB_SVC $PHP_FPM"
 info ""
 confirm "Go ahead?" || { info "Nothing changed."; exit 1; }
@@ -344,6 +427,44 @@ GRANT ALL PRIVILEGES ON *.* TO '$DB_ADMIN_USER'@'localhost' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 EOF
 ok "root password set, test database and anonymous users removed, $DB_ADMIN_USER created"
+
+# Where MariaDB listens. A drop-in named to sort after the distro's own
+# files (Debian's 50-server.cnf sets 127.0.0.1); Alpine also turns
+# networking off by default, so a LAN setup turns it back on.
+DB_CONF_DIR=$(db_conf_dir) || die "no MariaDB configuration directory (/etc/mysql/mariadb.conf.d or /etc/my.cnf.d)"
+if [ "$DB_REMOTE" = 1 ]; then
+    root_write "$DB_CONF_DIR/99-$CONF_NAME.cnf" <<EOF
+# Written by install-lamp.sh: MariaDB reachable from the LAN ($LAN_SUBNET).
+# Who may log in from there is limited by the users' hosts, and the
+# firewall opens port 3306 to $LAN_SUBNET only.
+[mysqld]
+bind-address = 0.0.0.0
+skip-networking = 0
+EOF
+    sql_root <<EOF
+CREATE USER IF NOT EXISTS '$DB_ADMIN_USER'@'$DB_LAN_HOST' IDENTIFIED BY $(sql_str "$DB_ADMIN_PW");
+ALTER USER '$DB_ADMIN_USER'@'$DB_LAN_HOST' IDENTIFIED BY $(sql_str "$DB_ADMIN_PW");
+GRANT ALL PRIVILEGES ON *.* TO '$DB_ADMIN_USER'@'$DB_LAN_HOST' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+EOF
+    ok "MariaDB listens on all addresses; $DB_ADMIN_USER may log in from $LAN_SUBNET"
+else
+    root_write "$DB_CONF_DIR/99-$CONF_NAME.cnf" <<EOF
+# Written by install-lamp.sh: MariaDB reachable from this computer only.
+[mysqld]
+bind-address = 127.0.0.1
+EOF
+    # A LAN login from an earlier run (host written as address/netmask).
+    sql_root -N -B -e "SELECT CONCAT('DROP USER ', QUOTE(User), '@', QUOTE(Host), ';') FROM mysql.user WHERE User = '$DB_ADMIN_USER' AND Host LIKE '%/%'" \
+        > "$TMPDIR_LAMP/drop.sql"
+    if [ -s "$TMPDIR_LAMP/drop.sql" ]; then
+        sql_root < "$TMPDIR_LAMP/drop.sql"
+        ok "removed $DB_ADMIN_USER's LAN login from an earlier run"
+    fi
+    ok "MariaDB listens on 127.0.0.1 only"
+fi
+service_restart "$DB_SVC"
+db_wait 30 || die "MariaDB didn't come back after changing where it listens"
 DB_SOCKET=$(sql_root -N -B -e 'SELECT @@socket')
 
 # --- PHP and Apache -------------------------------------------------------------------------
@@ -471,7 +592,13 @@ fi
 
 # --- Apache configuration ------------------------------------------------------------------------
 
-if [ "$PMA_REMOTE" = 1 ]; then PMA_ACCESS='Require all granted'; else PMA_ACCESS='Require local'; fi
+# Several Require lines in one <Directory> mean "any of these".
+if [ "$PMA_REMOTE" = 1 ]; then
+    PMA_ACCESS="Require local
+    Require ip $LAN_SUBNET"
+else
+    PMA_ACCESS='Require local'
+fi
 as_root mkdir -p "$CONF_DIR"
 root_write "$CONF_DIR/$CONF_NAME.conf" <<EOF
 # Written by install-lamp.sh.
@@ -503,11 +630,15 @@ service_restart "$WEB_SVC"
 # --- firewall ---------------------------------------------------------------------------------------
 
 if [ "$OPEN_FW" = 1 ]; then
-    case "$FIREWALL" in
-        firewalld) as_root firewall-cmd --permanent --add-service=http >/dev/null && as_root firewall-cmd --reload >/dev/null ;;
-        ufw) as_root ufw allow 80/tcp >/dev/null ;;
-    esac
-    ok "$FIREWALL: HTTP (port 80) open"
+    _fw_ports=80; [ "$DB_REMOTE" = 1 ] && _fw_ports="80 3306"
+    for _port in $_fw_ports; do
+        case "$FIREWALL" in
+            firewalld) as_root firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$LAN_SUBNET port port=$_port protocol=tcp accept" >/dev/null ;;
+            ufw) as_root ufw allow from "$LAN_SUBNET" to any port "$_port" proto tcp >/dev/null ;;
+        esac
+    done
+    [ "$FIREWALL" = firewalld ] && as_root firewall-cmd --reload >/dev/null
+    ok "$FIREWALL: port(s) $_fw_ports open to $LAN_SUBNET"
 fi
 
 # --- checks ---------------------------------------------------------------------------------------------
@@ -524,7 +655,22 @@ if MYSQL_PWD=$DB_ROOT_PW "$(db_client)" -u root -N -B -e 'SELECT 1' >/dev/null 2
 else
     warn "root can't log in to MariaDB with its password"; FAILED=1
 fi
+if [ "$DB_REMOTE" = 1 ]; then
+    _ip=$(lan_ip || true)
+    if [ -z "$_ip" ]; then
+        warn "no LAN address found to test MariaDB's LAN login from"
+    elif MYSQL_PWD=$DB_ADMIN_PW "$(db_client)" -h "$_ip" -P 3306 --protocol=TCP -u "$DB_ADMIN_USER" -N -B -e 'SELECT 1' >/dev/null 2>&1; then
+        ok "$DB_ADMIN_USER can log in to MariaDB over the LAN ($_ip:3306)"
+    else
+        warn "$DB_ADMIN_USER can't log in to MariaDB over the LAN ($_ip:3306)"; FAILED=1
+    fi
+fi
 sleep 1
+if [ "$PMA_REMOTE" = 1 ] && _ip=$(lan_ip) && [ -n "$_ip" ]; then
+    _code=$(curl -s -o /dev/null -w '%{http_code}' "http://$_ip/phpmyadmin/" || true)
+    if [ "$_code" = 200 ]; then ok "http://$_ip/phpmyadmin/ answers on the LAN address"
+    else warn "http://$_ip/phpmyadmin/ gives HTTP $_code"; FAILED=1; fi
+fi
 _code=$(curl -s -o "$TMPDIR_LAMP/page" -w '%{http_code}' http://localhost/phpmyadmin/ || true)
 if [ "$_code" = 200 ] && grep -q 'phpMyAdmin' "$TMPDIR_LAMP/page"; then
     ok "http://localhost/phpmyadmin/ shows phpMyAdmin's login page"
@@ -536,5 +682,8 @@ info ""
 if [ "$FAILED" = 1 ]; then warn "installed, but some checks failed (see above)"; exit 1; fi
 ok "done"
 info "phpMyAdmin: http://$SERVER_NAME/phpmyadmin/ (log in as $DB_ADMIN_USER)"
+[ "$PMA_REMOTE" = 1 ] && info "            from the LAN: http://$(lan_ip || echo "$SERVER_NAME")/phpmyadmin/"
+[ "$DB_REMOTE" = 1 ] && info "MariaDB on the LAN: $(lan_ip || echo "$SERVER_NAME"):3306 as $DB_ADMIN_USER, from $LAN_SUBNET"
 info "Web root:   $DOCROOT (http://$SERVER_NAME/)"
 info "MariaDB:    sudo mariadb, or mariadb -u $DB_ADMIN_USER -p"
+exit 0
