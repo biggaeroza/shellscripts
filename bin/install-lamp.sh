@@ -293,7 +293,8 @@ WEB_GROUP=$(id -gn "$WEB_USER") || die "the web server user $WEB_USER doesn't ex
 
 info ""; info "== MariaDB"
 # Arch and Alpine ship an empty data directory; create the system tables.
-if [ ! -d /var/lib/mysql/mysql ]; then
+# The data directory is readable only by mysql/root, so look as root.
+if ! as_root test -d /var/lib/mysql/mysql; then
     if have_cmd mariadb-install-db || [ -x /usr/bin/mariadb-install-db ]; then
         as_root mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null
     else
