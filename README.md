@@ -11,6 +11,7 @@ written on.
 | `bin/add-to-dialout.sh` | Adds you to the serial-port group (`dialout`, or `uucp` on Arch) so you can use USB-serial adapters without root. `--check` only reports. |
 | `bin/install-virt-manager.sh` | Installs QEMU/KVM, libvirt and virt-manager with UEFI firmware, a software TPM, virt-install and virt-viewer; starts libvirt, turns on the `default` NAT network and adds you to the `libvirt` and `kvm` groups. `--check` only reports. |
 | `bin/install-lamp.sh` | Installs and configures Apache, MariaDB, PHP and phpMyAdmin. Asks for every name and password first (MariaDB root, an admin user for phpMyAdmin, server name, whether phpMyAdmin and MariaDB are reachable from the LAN, firewall), then sets everything up with nothing more to answer: secured MariaDB listening on 127.0.0.1 or, if asked, the LAN (that subnet only, root never), phpMyAdmin from phpmyadmin.net (SHA-256 checked) with its configuration storage, and a final check that it all answers. `--check` only reports. |
+| `bin/install-materializr.sh` | Gets the latest [Materializr](https://github.com/materializr-cad/materializr) source (main, or `--stable` for the latest release), builds it with OpenCASCADE at the version the project pins, installs it under `~/.local` and adds it to the applications menu with its icon. Run it again to update; it rebuilds only when there is something new. `--check` reports, `--uninstall` removes it. |
 
 Every script shows its options with `--help`, asks before changing
 anything (`--yes` skips the question) and uses root only for the steps
